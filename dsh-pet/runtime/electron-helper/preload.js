@@ -30,6 +30,11 @@ contextBridge.exposeInMainWorld('petBridge', {
   setInputBusy(busy) {
     ipcRenderer.send('pet:input-busy', !!busy);
   },
+  // 显示范围（仅桌面 / 全部软件 / 关闭）：渲染端每秒轮询 /state 拿到宿主合并好的档位，
+  // **只在真的变了**才上报一次；主进程据此重算全部宠物窗口的可见性（见 main.js 的说明）。
+  setDisplayScope(scope) {
+    ipcRenderer.send('pet:set-display-scope', String(scope || ''));
+  },
   // 右键菜单「打开网站」：主进程用系统默认浏览器打开 DSH 网站（等效网页 Ctrl+点击链接）
   openDshSite(url) {
     ipcRenderer.send('pet:open-site', { url });

@@ -64,6 +64,11 @@ async function boot() {
     const cfg = await loadConfig();
     config = cfg;
     hideError();
+    // 显示范围（仅桌面 / 全部软件 / 关闭）：建窗时主进程按注入档位决定首帧可见性，渲染端这里
+    // **立刻**跑一拍 /state 把它同步进来（事件轮询本来要 1s 才第一拍）。放在 config 赋值之后：
+    // 右键菜单的「显示范围：X」标签读的就是这个档位，先同步再建 sprite，
+    // 菜单从弹出第一刻起显示的就是真实档位。
+    await pollStateOnce();
     const pets = cfg.pets.filter((p) => S.isDesktopVisible(p.display));
     if (pets.length === 0) {
       showError('配置中没有 display 为 desktop/both 的宠物，桌面模式不显示宠物');

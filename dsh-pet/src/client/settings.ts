@@ -15,6 +15,7 @@ import { PET_DISPLAYS } from '../shared/config';
 import { DEFAULT_PHYSICS } from '../shared/physics';
 import { NOTIFY_ICONS, reloadNotifications, requestNotificationPermission } from './notify';
 import type { Corner, ModelSelection, Pet, PetDisplay, PhysicsParams } from '../shared/types';
+import { DISPLAY_SCOPES, DEFAULT_DISPLAY_SCOPE, toDisplayScope, type DisplayScope } from '../shared/display-scope';
 import type { ChangeEvent, Dispatch, FunctionComponent, SetStateAction } from 'react';
 import type * as ReactNS from 'react';
 import type { jsx } from 'react/jsx-runtime';
@@ -228,6 +229,17 @@ export const zh = {
   'display.desktop': '仅桌面',
   'display.both': '两者都显示',
   'display.none': '都不显示',
+  // 显示范围（全局一档：桌宠浮在哪些软件之上）
+  scopeTitle: '桌宠显示范围',
+  scopeHint:
+    '桌宠窗口永远是置顶小窗，所以它天然浮在所有软件之上。这一档决定它出现在哪些软件之上——只影响桌面模式（Electron 透明窗）；网页里的桌宠本来就只活在页面内，由每只宠物的「显示位置」决定。改完点「保存」即时生效。',
+  'scope.desktop': '仅桌面',
+  'scope.desktopHint':
+    '只在桌面上露面：焦点切到别的软件（浏览器 / 微信 / 编辑器…）就自动收起来，切回桌面再冒出来。想在桌面上养一只、又不希望它压在正在用的软件上，选这个。',
+  'scope.all': '全部软件',
+  'scope.allHint': '一直浮在最上层，与引入本档位之前的行为完全一致。',
+  'scope.off': '关闭',
+  'scope.offHint': '不显示桌宠（网页里的宠物不受影响）。',
   cornerLabel: '位置',
   'corner.top-left': '左上角',
   'corner.top-right': '右上角',
@@ -382,6 +394,17 @@ export const en = {
   'display.desktop': 'Desktop only',
   'display.both': 'Both',
   'display.none': 'Neither',
+  // Display scope (global: which windows the desktop pet floats above)
+  scopeTitle: 'Desktop pet scope',
+  scopeHint:
+    'The pet window is always on top, so by default it floats above every application. This picks where it shows up — desktop mode (the Electron window) only; the pet inside the web UI lives in the page and is governed by each pet\'s "Display" setting. Changes apply right after "Save".',
+  'scope.desktop': 'Desktop only',
+  'scope.desktopHint':
+    'Only on the desktop: it hides as soon as focus moves to another application and comes back when you return to the desktop.',
+  'scope.all': 'All applications',
+  'scope.allHint': 'Always floats on top — exactly the behaviour before this option existed.',
+  'scope.off': 'Off',
+  'scope.offHint': 'No desktop pet (the pet inside the web UI is unaffected).',
   cornerLabel: 'Position',
   'corner.top-left': 'Top-left',
   'corner.top-right': 'Top-right',
@@ -619,6 +642,44 @@ export function makePetConfigSection(rt: {
               checked: value,
               disabled,
               onChange: (e: ChangeEvent<HTMLInputElement>) => onToggle(e.target.checked),
+            }),
+            h('span', { key: 't', children: t(label) }),
+          ],
+        }),
+        q(t(label + 'Hint'), end),
+      ],
+    });
+
+  /**
+   * 三选一的一格（显示范围用）：同名的 radio + 标题 + 问号。
+   *
+   * 用 radio 而不是 select / 三个开关：这一档是「三选一、必有一个生效」的互斥选择，
+   * radio 的语义（含键盘方向键切换）正好对上，也让三个选项的说明能各自挂在问号上。
+   * name 固定为 'dsh-pet-scope'：同组互斥；disabled 期间不可改（与其余控件一起随 busy 禁用）。
+   */
+  const radioCell = (
+    name: string,
+    label: string,
+    value: DisplayScope,
+    current: DisplayScope,
+    disabled: boolean,
+    onChange: (v: DisplayScope) => void,
+    end = false,
+  ): ReturnType<typeof h> =>
+    h('div', {
+      className: 'dsh-pet-cfg__toggle',
+      children: [
+        h('label', {
+          key: 'l',
+          children: [
+            h('input', {
+              key: 'i',
+              type: 'radio',
+              name,
+              value,
+              checked: current === value,
+              disabled,
+              onChange: () => onChange(value),
             }),
             h('span', { key: 't', children: t(label) }),
           ],
@@ -947,6 +1008,9 @@ export function makePetConfigSection(rt: {
     const [chatImage, setChatImage] = useState(false);
     // 抛掷锁定开关（全局：写用户级配置；与「保存」一起提交，不做即时写入）
     const [confineScreen, setConfineScreen] = useState(false);
+    // 显示范围（全局一档：仅桌面 / 全部软件 / 关闭；写用户级配置的 displayScope）。
+    // 与四个全局开关同一套语义：只改本地状态，随「保存」整包写入（不做即时写入）。
+    const [scope, setScope] = useState<DisplayScope>(DEFAULT_DISPLAY_SCOPE);
     // 物理参数（全局：拖拽抛掷手感，写用户级配置 main-config.jsonc 的 physics 段）。
     // 与四个开关同一套语义：只改本地状态，随「保存」整包写入（不做即时写入）。
     // 初值仅作占位；成品配置加载成功后才允许编辑和保存。
@@ -980,6 +1044,8 @@ export function makePetConfigSection(rt: {
       if (typeof m.whisperImageEnabled === 'boolean') setWhisperImage(m.whisperImageEnabled);
       if (typeof m.chatImageEnabled === 'boolean') setChatImage(m.chatImageEnabled);
       if (typeof m.confineToScreen === 'boolean') setConfineScreen(m.confineToScreen);
+      // 显示范围：成品已按白名单校验过（非法值在合并阶段就换成内置默认），这里只做形状兜底
+      if (m.displayScope !== undefined) setScope(toDisplayScope(m.displayScope));
       // physics 段：成品已按「内置默认 ← 用户层」整段填满，直接取用（缺子键再用默认兜底一次）
       if (m.physics && typeof m.physics === 'object') {
         setPhysics({ ...DEFAULT_PHYSICS, ...(m.physics as PhysicsParams) });
@@ -1157,6 +1223,8 @@ export function makePetConfigSection(rt: {
           whisperImageEnabled: whisperImage,
           chatImageEnabled: chatImage,
           confineToScreen: confineScreen,
+          // 显示范围（全局白名单字段）：宿主用 topFieldValid('displayScope') 校验三档
+          displayScope: scope,
           // 物理参数整段提交（白名单字段，未传即走宿主透传保留）：宿主用 physicsValid 整段校验
           physics: physics,
           // 碎碎念 / 对话的模型（条目级白名单字段，同上）：宿主用 modelSelectionValid 整段校验，
@@ -1501,6 +1569,32 @@ export function makePetConfigSection(rt: {
               className: 'dsh-pet-cfg__note',
               children: t('emptyPets'),
             }),
+
+        // 桌宠显示范围卡（全局一档：仅桌面 / 全部软件 / 关闭）。
+        // 单独一张卡而不塞进「全局开关」：那里是四个布尔开关，这一档是三选一，
+        // 而且它管的是「桌宠浮在哪些软件之上」，与那几个开关（通知/配图/锁屏）不同类。
+        // 与其余控件同一套语义：只改本地状态，随「保存」整包写入用户配置（不做即时写入）。
+        // 桌面端保存后由宿主写进 /state，渲染端下一拍读到 → 主进程就地重算窗口可见性，不必重启 helper。
+        h('div', {
+          className: 'dsh-pet-cfg__card',
+          children: [
+            cardHead(t('scopeTitle'), t('scopeHint')),
+            h('div', {
+              className: 'dsh-pet-cfg__grid3',
+              children: DISPLAY_SCOPES.map((value, i) =>
+                radioCell(
+                  'dsh-pet-scope',
+                  'scope.' + value,
+                  value,
+                  scope,
+                  busy,
+                  setScope,
+                  i === DISPLAY_SCOPES.length - 1,
+                ),
+              ),
+            }),
+          ],
+        }),
 
         // 全局开关卡（需求 4：四个开关一行）。
         // 四个开关行为**一致**：切换只改本地状态，随「保存」整包写入用户级配置——不做即时写入

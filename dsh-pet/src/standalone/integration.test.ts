@@ -96,9 +96,14 @@ describe('插件宿主半边在独立模式下跑起来了', () => {
       sections: Record<string, { counter: number; data: unknown }>;
       pets: Record<string, unknown>;
     };
-    assert.deepEqual(Object.keys(body.sections).sort(), ['balance', 'notify', 'workStatus']);
+    assert.deepEqual(Object.keys(body.sections).sort(), ['balance', 'displayScope', 'notify', 'workStatus']);
     assert.equal(body.sections.balance?.counter, 0);
     assert.equal(body.sections.balance?.data, null);
+    // displayScope 的存在是形状契约（桌面渲染端按它读档位）；但它的值是**读配置读出来的**，
+    // 而独立模式的源码形态下包内 assets/config.jsonc 不可达、readAllConfig 必抛（见文件头），
+    // 于是发布函数保留"未发布"状态：counter 0 + data null。这里只钉形状，不钉值。
+    assert.equal(body.sections.displayScope?.counter, 0);
+    assert.equal(body.sections.displayScope?.data, null);
     assert.deepEqual(body.pets, {});
   });
 

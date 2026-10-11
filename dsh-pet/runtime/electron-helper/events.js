@@ -212,6 +212,26 @@ function applyBalanceNotice(state, explicit) {
 // 各功能逐个接入，旧的独立轮询循环随迁随删。
 let stateBaseline = null;
 
+/**
+ * 显示范围（仅桌面 / 全部软件 / 关闭）：把 /state 里**每拍都读**的档位同步进来。
+ *
+ * 为什么读叶子而不用 takeChanged：首拉只记基线不渲染（见 pollStateOnce），而显示范围必须
+ * 首拍就生效——否则切到「关闭」后重启 helper，宠物会一直冒到第一次真正变化为止。
+ * 因此这里按"与本地当前档位不同才处理"的方式去重，与 takeChanged 的意图一致，
+ * 但不依赖 counter 变化。
+ *
+ * 档位变了就做两件事：更新全局档位（右键菜单标签立刻跟上）＋通知主进程，
+ * 由它重算全部宠物窗口的可见性（档位是全局的，任一窗口上报都等效）。
+ */
+function applyDisplayScope(s) {
+  const leaf = s && s.sections ? s.sections.displayScope : null;
+  if (!leaf) return; // 宿主没写这个 section（旧宿主）：保持建窗时注入的档位，不动
+  if (!setCurrentScope(leaf.data)) return; // 没变：不重复通知主进程
+  if (window.petBridge && window.petBridge.setDisplayScope) {
+    window.petBridge.setDisplayScope(currentScope());
+  }
+}
+
 /** 余额叶子 → 展示（成功播档位动画 + 气泡；不可用按 shared 判定弹文字说明） */
 function applyBalanceLeaf(leaf) {
   const hit = S.readBalance(leaf);
@@ -257,11 +277,31 @@ function applyAnimLeaf(petId, leaf) {
   }
 }
 
+/**
+ * 显示范围（仅桌面 / 全部软件 / 关闭）：把 /state 里**每拍都读**的档位同步给主进程。
+ *
+ * 为什么读叶子而不用 takeChanged：首拉只记基线不渲染（见 pollStateOnce），而显示范围必须
+ * 首拍就生效——否则切到「关闭」后重启 helper，宠物会一直冒到第一次真正变化为止。
+ * 因此这里按"本地记着上一次上报过的值、不同才发"的方式去重，与 takeChanged 的意图一致，
+ * 但不依赖 counter 变化。
+ *
+ * 主进程收到后自行重算所有窗口的可见性（档位是全局的，任一窗口上报都等效）。
+ */
+function applyDisplayScope(s) {
+  const leaf = s && s.sections ? s.sections.displayScope : null;
+  if (!leaf) return; // 宿主没写这个 section（旧宿主）：保持主进程的启动注入值，不动
+  const next = S.toDisplayScope(leaf.data);
+  if (next === lastReportedScope) return;
+  lastReportedScope = next;
+  if (window.petBridge && window.petBridge.setDisplayScope) window.petBridge.setDisplayScope(next);
+}
+
 /** 跑一拍 /state（1s 定时与「前端动作后立刻刷新」共用同一份实现） */
 async function pollStateOnce() {
   try {
     const s = await S.fetchState(STATE_URL);
     if (!s) return;
+    applyDisplayScope(s); // 显示范围：每拍都同步（首拉也算），不受下面的基线机制影响
     if (stateBaseline === null) {
       stateBaseline = S.flattenCounters(s); // 首拉：只记基线，不渲染（避免启动/重载时重放旧气泡）
       return;

@@ -13,7 +13,34 @@ const CONFIG = {
   configUrl: params.get('configUrl') || 'http://127.0.0.1:3080/dsh-pet-7340/config',
   scale: Number(params.get('scale') || '1'),
   petIndex: Number(params.get('petIndex') || '0'),
+  // 主进程建窗时用的显示范围档位（仅桌面 / 全部软件 / 关闭）：渲染端拿它当"已上报基线"的初值，
+  // 使首拍 /state 与注入值一致时不发多余的 IPC（见 events.js 的 lastReportedScope）。
+  initialDisplayScope: params.get('displayScope') || '',
 };
+
+// ---------- 显示范围（仅桌面 / 全部软件 / 关闭）：全局一份，右键菜单与设置页写同一档 ----------
+// 当前档位存在一个全局变量里（**唯一事实来源**）：
+//   - 建窗时由主进程经 URL query 注入初值（与主进程自己的 displayScope 同一个来源，不会不一致）；
+//   - 渲染端每拍 /state 读到宿主合并好的档位后经 setDisplayScope() 更新（见 events.js）。
+// sprite.js 的右键菜单据此显示当前档位，events.js 据此去重上报，都读它。
+const SCOPE_LABELS = S.DISPLAY_SCOPE_LABELS; // 档位 → 中文短标签（与 src/shared 单一来源）
+/** 右键菜单「显示范围」子菜单的选项（顺序与设置页一致：从最克制到最放开，关闭放最后） */
+const SCOPE_ACTIONS = S.DISPLAY_SCOPES.map((value) => ({ scope: value, label: SCOPE_LABELS[value] }));
+
+let currentDisplayScope = S.toDisplayScope(CONFIG.initialDisplayScope);
+
+/** 当前生效的显示范围档位（右键菜单标签与上报去重都读它） */
+function currentScope() {
+  return currentDisplayScope;
+}
+
+/** 更新当前档位（返回是否真的变了）：变了才需要通知主进程 / 重画菜单标签 */
+function setCurrentScope(value) {
+  const next = S.toDisplayScope(value);
+  if (next === currentDisplayScope) return false;
+  currentDisplayScope = next;
+  return true;
+}
 
 // ---------- 渲染端坐标系统一约定（DESIGN.md §3.5） ----------
 // main 进程对窗口做页面级缩放 setZoomFactor(CONFIG.scale) 后，本窗口的 DOM 度量、事件坐标、

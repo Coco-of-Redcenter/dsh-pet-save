@@ -31,7 +31,7 @@ export interface StateLeaf {
 }
 
 /** 全局段（所有端共享一份） */
-export type SectionName = 'balance' | 'workStatus' | 'notify';
+export type SectionName = 'balance' | 'workStatus' | 'notify' | 'displayScope';
 
 /** 每宠物段（say = 要说的话；anim = 要播的动画名） */
 export type PetLeafName = 'say' | 'anim';
@@ -56,7 +56,15 @@ export class PollStateStore {
 
   constructor() {
     this.last = 0;
-    this.sections = { balance: emptyLeaf(), workStatus: emptyLeaf(), notify: emptyLeaf() };
+    // displayScope：桌宠显示范围（仅桌面 / 全部软件 / 关闭）。桌面渲染端每拍 /state 都读它
+    // （见 runtime/electron-helper/events.js 的 applyDisplayScope），据此让主进程重算窗口可见性，
+    // 所以它是"每拍读、不看 counter"的特例——counter 仍然照常推进，方便排障时看它何时被改过。
+    this.sections = {
+      balance: emptyLeaf(),
+      workStatus: emptyLeaf(),
+      notify: emptyLeaf(),
+      displayScope: emptyLeaf(),
+    };
     this.pets = new Map();
   }
 

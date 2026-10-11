@@ -615,6 +615,47 @@ export function apply(ctx: any): void {
     }
   };
 
+  // ---------- 显示范围（仅桌面 / 全部软件 / 关闭）：唯一出口 → S 的 sections.displayScope ----------
+  //
+  // 为什么经 S 而不是别的通道：桌面渲染端本来就在每秒轮询 /state（一窗一宠各一条），
+  // 档位搭这条既有通道走，运行期改档位**零新增协议、零 helper 重启**——主进程收到渲染端
+  // 上报后重算全部窗口可见性即可（见 runtime/electron-helper/main.js 的 pet:set-display-scope）。
+  //
+  // 合法性收敛在 config（topFieldValid 'displayScope'，白名单三档）：readAllConfig 返回的成品
+  // 里该字段**已经被校验过**，非法值在合并阶段就换成了内置默认并告警。所以这里读到什么就发什么，
+  // 不做第二次校验（与 notificationsEnabled 同一口径）。
+  let publishedScope = '\u0000'; // 与任何真实档位都不等 → 启动时必定写一次，渲染端首拍即可读到
+  const publishDisplayScope = (): void => {
+    let next: string;
+    try {
+      const conf = readAllConfig(configPaths) as { main?: Record<string, unknown> } | undefined;
+      next = String(conf?.main?.displayScope ?? '');
+    } catch (e) {
+      // 读配置抛错 = 安装损坏（内置默认缺失/损坏，见 readAllConfig 的契约）：保留上一次已发布的值，
+      // 而不是把它清空——配置读不出来时不该顺手把用户的桌宠显示范围改掉。
+      ctx.logger?.warn?.(`[dsh-pet] 读取显示范围失败：${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    if (!next || next === publishedScope) return;
+    publishedScope = next;
+    state.writeSection('displayScope', next);
+  };
+  publishDisplayScope(); // 启动即发布：渲染端第一拍就拿到正确档位，不必等下一次配置变化
+
+  /**
+   * 「关闭」档要不要跑桌面窗口进程。
+   *
+   * 关闭档下桌宠根本不显示，而 /state 轮询、置顶看门狗、光标兜底轮询都挂在窗口上，还白占一个
+   * Electron 进程与一个前台探测子进程——所以这一档连 helper 都不拉（拉起入口与 syncDesktop 都看它）。
+   *
+   * 代价（有意取舍）：关闭档下桌宠不可见 ⇒ 右键菜单也点不到 ⇒ **不能**靠右键菜单切回别的档，
+   * 必须去设置页改。反过来说：允许在关闭档下点菜单把宠物召回来，意味着要为一个看不见的窗口
+   * 常驻整个 Electron 进程，不值得。
+   *
+   * 用户手改配置文件 / 设置页保存 / 点「重载配置」都会经过 syncDesktop → 这里的值随之翻新。
+   */
+  const helperWanted = (): boolean => hasDesktopPet && publishedScope !== 'off';
+
   let helper: HelperProcess | undefined;
   let startRetryTimer: NodeJS.Timeout | undefined;
   let electronEnsure: Promise<void> | undefined;
@@ -625,7 +666,7 @@ export function apply(ctx: any): void {
   /** 用已确认存在的 Electron 路径拉起桌面 Helper（每只桌面宠物一个局部小窗口）。 */
   const launchHelper = (electronPath: string | undefined): void => {
     if (helper || disposed) return;
-    if (!hasDesktopPet) return; // 无宠物显示在桌面（display 含 desktop/both）：不启动
+    if (!helperWanted()) return; // 无桌面宠物，或显示范围为「关闭」：不启动
     const port = typeof ctx.webServer?.port === 'number' ? ctx.webServer.port : 0;
     if (!port || port <= 0) {
       // webServer 可能尚未完成监听（OS 分配端口时 port 短暂为 0）：延迟重试。
@@ -659,6 +700,10 @@ export function apply(ctx: any): void {
           DSH_PET_BRIDGE: '1',
           // 每只桌面宠物一个局部小窗口：透传宠物列表（[{id,size}]）
           DSH_PET_PETS: JSON.stringify(desktopPetList()),
+          // 显示范围（仅桌面 / 全部软件 / 关闭）：spawn 时就注入，让**建窗首帧**就按正确档位出现——
+          // 否则 'off' / 'desktop' 档会先按默认的"一直显示"冒出来，下一拍才被藏回去（可见的闪烁）。
+          // 运行期改档位不走这里，而是经 /state 轮询 → IPC（见 pet:set-display-scope）。
+          DSH_PET_DISPLAY_SCOPE: publishedScope === '\u0000' ? 'all' : publishedScope,
         },
         // bridge 协议处理器 = HTTP 路由同一份 handlePetRoute（业务逻辑唯一，两端天然一致）；
         // 素材过文件路径（main.js 自行读盘），json/text 过 body
@@ -694,7 +739,7 @@ export function apply(ctx: any): void {
    *  （不 spawn 子进程，CLI node 与 DSH Desktop 均适用），下载完成后自动拉起。 */
   const startHelper = (): void => {
     if (helper || electronEnsure || disposed) return;
-    if (!hasDesktopPet) return; // 无宠物显示在桌面（display 含 desktop/both）：不启动
+    if (!helperWanted()) return; // 无桌面宠物，或显示范围为「关闭」：不启动
     // 无图形显示环境（Linux 服务器 / 容器）：直接放弃，不探测、不下载、不拉起。
     // 否则 Electron 会「拉起即崩」，被守护循环反复重启并刷满 core dump。
     if (!hasGraphicalDisplay()) {
@@ -830,6 +875,9 @@ export function apply(ctx: any): void {
           }
           await mkdir(userRoot, { recursive: true });
           await writeFile(userConfigPath, JSON.stringify(clean, null, 2), 'utf8');
+          // 显示范围可能在这次保存里被改（设置页的三选一）：先写进 S，桌面渲染端下一拍即读到，
+          // 主进程随之重算窗口可见性——不必等下面的 helper 重启（那条路只处理宠物数量/display/size）。
+          publishDisplayScope();
           void syncDesktop(); // display/size 等可能变化：重解析桌面宠物并重启 Helper（异步，不阻塞保存响应）
           // 响应体 = 保存后的**成品聚合**（与 GET /config 同一份，字段已填满）：
           // 设置页把它直接交给容器的 flattenConfigPets 拍平渲染——客户端的条目级字段
@@ -849,6 +897,8 @@ export function apply(ctx: any): void {
           // 默认文件缺失 / 用户目录不可写：显式 500，绝不静默留下半个配置文件
           return { kind: 'json', status: 500, obj: { error: e instanceof Error ? e.message : String(e) } };
         }
+        // 恢复默认会连 displayScope 一起回到内置默认 "all"：同样先把它发布出去（同上）
+        publishDisplayScope();
         void syncDesktop(); // 配置变了：重解析桌面宠物并重启 Helper（异步，不阻塞响应）
         return { kind: 'json', status: 200, obj: readAllConfig(configPaths) };
       }
@@ -862,6 +912,9 @@ export function apply(ctx: any): void {
     // 注意：发起者就是**即将被重启的那个 helper**，本响应不保证送达，因此不 await 重启、立刻回 200。
     if (rest === 'reload') {
       if (method !== 'POST') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
+      // 用户可能是**手改配置文件**后从右键菜单点「重载配置」：displayScope 也要跟着重读并发出去，
+      // 否则手改的档位要等到下一次设置页保存才生效。
+      publishDisplayScope();
       void syncDesktop();
       return { kind: 'json', status: 200, obj: { reloading: true } };
     }

@@ -23,6 +23,7 @@
 //   不再使用"逐项 mouseleave 延迟关闭定时器"——旧实现里鼠标从分类项移向三级面板时，
 //   会同时给父项（动作）排下无人取消的关闭定时器，导致二级+三级一起消失。
 import type { Animations, Category } from './types';
+import type { DisplayScope } from './display-scope';
 
 /** 叶子：可点击的菜单项 */
 export interface MenuLeaf {
@@ -32,8 +33,12 @@ export interface MenuLeaf {
   /** 自定义动作：open-site=打开网站 / show-balance=查看余额；whisper=立即碎碎念一句；
    * chat=打开对话弹窗；home=回到初始位置；reload=重载配置（桌面端专属：重启桌面 Helper，
    * 全部桌面宠物窗口按最新配置重建——浏览器端刷新页面即可，不注入此项）。
+   * set-scope=切换桌宠显示范围（仅桌面 / 全部软件 / 关闭），目标档位在 scope 字段（桌面端专属：
+   * 浏览器 overlay 只活在页面内，本来就不浮在别的软件上，不注入此项）。
    * 手动触发均不受 whisperEnabled 影响（该字段只关自动周期轮询） */
-  action?: 'open-site' | 'show-balance' | 'whisper' | 'chat' | 'home' | 'reload';
+  action?: 'open-site' | 'show-balance' | 'whisper' | 'chat' | 'home' | 'reload' | 'set-scope';
+  /** action='set-scope' 的目标档位（其余 action 不用） */
+  scope?: DisplayScope;
 }
 
 /** 分支：带子菜单的项 */

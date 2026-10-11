@@ -58,6 +58,10 @@ const { TOPMOST_WATCHDOG_TICK_MS, shouldReassertTopmost } = require('./topmost-w
 const { HOST_POLL_MS, hostIsGone, isBrokenPipeError, parseHostPid } = require('./host-liveness.js');
 // 全局 DPI 线性化的纯判定与换算（含平台例外：macOS 的 DIP 已是「点」，无需补偿；见该文件头）
 const { shouldLinearize, resolveForcedScale, resolvePetScale } = require('./dpi-linearization.js');
+// 「显示范围」：仅桌面 / 全部软件 / 关闭 的纯判定（decideWindowVisible / isDesktopClass）
+const { decideWindowVisible, isDesktopClass, toDisplayScope } = require('./display-scope.js');
+// 前台窗口探测（Windows 专用，事件驱动、无轮询）：desktop 档据此判断"现在是不是桌面在台前"
+const { startForegroundProbe } = require('./foreground-probe.js');
 
 // 允许无用户手势直接播放（余额动画等）
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -277,6 +281,108 @@ if (BRIDGE) {
 /** 窗口表：petId -> BrowserWindow */
 const windows = new Map();
 
+// ---------- 显示范围（仅桌面 / 全部软件 / 关闭）----------
+//
+// 桌宠窗口是 alwaysOnTop + 'screen-saver' 层，必然浮在所有普通窗口之上；'desktop' 档要求
+// 「只在桌面显示」——前台是别的软件就藏起来、回桌面再冒出来（Windows 上 Electron 没有原生
+// 的"只贴桌面"窗口类型，只能靠前台窗口探测兑现，规则见 display-scope.js）。
+//
+// 档位来源有两条，都是**宿主**说了算（本进程不自己读配置文件）：
+//   ① 启动时经 DSH_PET_DISPLAY_SCOPE 注入 —— 让窗口首帧就按正确档位出现，
+//      避免"先按默认全部软件冒出来、一拍之后才藏起来"的可见跳变；
+//   ② 运行期由渲染端经 pet:set-display-scope 上报 —— 渲染端每秒轮询 /state，
+//      从 sections.displayScope 读宿主合并好的档位，只在**真的变了**才上报一次。
+//      设置页/右键菜单改档位 → 宿主写用户配置 + 写 S → 下一拍所有窗口同步生效，不必重启 helper。
+
+/** 当前生效的显示档位（全局一份：档位是全局设置，所有宠物窗口共用） */
+let displayScope = toDisplayScope(process.env.DSH_PET_DISPLAY_SCOPE);
+
+/** 前台窗口探测通道（仅 Windows 起得来；起不来时 desktop 档降级为一直可见，见 decideWindowVisible） */
+let foregroundProbe = null;
+
+/** 当前前台窗口的类名（探测通道每报一次就更新；探测不可用时恒为空串） */
+let foregroundClassName = '';
+
+/** 当前前台窗口的原生句柄（0 = 未知）：用来判断"正在被点的窗口是不是我们自己的桌宠" */
+let foregroundHandle = 0;
+
+/** 最近一次已知的"前台是不是桌面"。探测不可用时恒为 false，但 decideWindowVisible 会先看
+ *  probeAvailable —— 探测不可用时 desktop 档直接降级成一直可见，不读这个值。 */
+let foregroundIsDesktop = false;
+
+/** 本进程所有宠物窗口的原生句柄（getNativeWindowHandle 的 Buffer → 数字）。
+ *  desktop 档下"用户正在点/拖桌宠"也算桌面态，否则宠物会在被点中的那一瞬间把自己藏掉。 */
+const nativeHandles = new Map();
+
+/** getNativeWindowHandle() → 小端序指针数字（Windows x64 上 8 字节）。 */
+function nativeHandleOf(win) {
+  try {
+    const buf = win.getNativeWindowHandle();
+    if (!buf || typeof buf.readBigUInt64LE !== 'function') return 0;
+    return Number(buf.readBigUInt64LE(0));
+  } catch {
+    return 0;
+  }
+}
+
+/** 探测通道是否可用（起得来且至少报过一次）：false → desktop 档降级为一直可见 */
+function probeAvailable() {
+  return !!(foregroundProbe && foregroundProbe.available());
+}
+
+/**
+ * 前台窗口变了（探测通道的回调）：更新镜像状态，并让窗口可见性跟着重算。
+ *
+ * 只在**桌面 ↔ 非桌面 这一类判定真的翻转**时才动窗口：前台在浏览器两个标签页之间切换同样会
+ * 触发本回调，那时 shouldShow 没变，不该去 show/hide 窗口（会打断正在播放的动画）。
+ */
+function onForegroundChanged(state) {
+  const wasDesktop = foregroundIsDesktop;
+  foregroundClassName = state && typeof state.className === 'string' ? state.className : '';
+  foregroundHandle = state && Number.isFinite(state.hwnd) ? state.hwnd : 0;
+  foregroundIsDesktop = isDesktopClass(foregroundClassName);
+  if (displayScope !== 'desktop') return; // 其余档位不看前台，省掉一次全窗口重算
+  if (wasDesktop === foregroundIsDesktop) return;
+  applyAllWindowVisibility();
+}
+
+/** 前台窗口是不是"我们自己的某个桌宠窗口"（把当前前台句柄与窗口表比对） */
+function petWindowIsForeground() {
+  if (!foregroundHandle) return false;
+  for (const handle of nativeHandles.values()) {
+    if (handle === foregroundHandle) return true;
+  }
+  return false;
+}
+
+/**
+ * 按当前档位 + 前台状态把**单个**窗口调整为该有的可见状态。
+ *
+ * 这是本进程唯一决定"宠物窗显示还是藏起"的地方：建窗首次显示、档位变更、前台变化
+ * 三条路都收敛到这里，避免多处各写一套 show/hide 判断而互相打架。
+ */
+function applyWindowVisibility(win) {
+  if (!win || win.isDestroyed()) return;
+  const shouldShow = decideWindowVisible({
+    scope: displayScope,
+    foregroundIsDesktop,
+    petWindowIsForeground: petWindowIsForeground(),
+    probeAvailable: probeAvailable(),
+  });
+  if (shouldShow) {
+    if (!win.isVisible()) win.showInactive(); // showInactive：冒出来时不抢焦点（用户可能正在别的软件里打字）
+    // 藏起再冒出来后 z 序会被重置，这里重新钉一次置顶带（与置顶看门狗同一个调用）
+    win.setAlwaysOnTop(true, 'screen-saver');
+  } else if (win.isVisible()) {
+    win.hide();
+  }
+}
+
+/** 对全部宠物窗口重算一次可见性（档位变更 / 前台变化后调用） */
+function applyAllWindowVisibility() {
+  for (const win of windows.values()) applyWindowVisibility(win);
+}
+
 /** win.id -> 上一次**请求**的内容区矩形（"x,y,w,h"）：pet:set-bounds 的去重基准，见那里的注释 */
 const lastRequestedBounds = new Map();
 
@@ -466,15 +572,16 @@ function createPetWindows() {
     // 默认整窗点击穿透（renderer 在光标进/出身体命中区时经 IPC 翻转可交互）；
     // forward:true 保证穿透期间 mousemove 仍转发进渲染端做命中判定。
     setWindowIgnore(win, true);
-    win.once('ready-to-show', () => win.show());
+    // 原生句柄登记：desktop 档判断"当前前台是不是我们自己的桌宠窗口"要拿它与前台句柄比对
+    nativeHandles.set(win.id, nativeHandleOf(win));
     // [#55 兜底显示] paintWhenInitiallyHidden:false 时渲染器可能不产出首帧，ready-to-show 便永不触发
     // （Electron 文档原文：ready-to-show "will never fire if you use paintWhenInitiallyHidden: false"），
-    // 而 show() 只挂在它上面 → 窗口永远隐藏（进程活着、宠物逻辑照跑，桌面上什么都没有）。
-    // 页面加载完成后强制兜底一次；zoomFactor 的设置在更早注册的 did-finish-load 里，顺序不受影响。
+    // 而显示只挂在它上面 → 窗口永远隐藏（进程活着、宠物逻辑照跑，桌面上什么都没有）。
+    // 两条路都走 applyWindowVisibility（而不是直接调窗口的 show）：初始档位是「关闭」或「仅桌面且
+    // 当前前台不是桌面」时，首帧就不该冒出来（否则会先闪一下再被藏回去）。
+    win.once('ready-to-show', () => applyWindowVisibility(win));
     win.webContents.once('did-finish-load', () => {
-      setTimeout(() => {
-        if (!win.isDestroyed() && !win.isVisible()) win.show();
-      }, 400);
+      setTimeout(() => applyWindowVisibility(win), 400);
     });
     // [#55 兜底交互] 上面的翻转链路只有「Electron forward 鼠标钩子 → 渲染端命中判定」一个入口，
     // 该钩子在 Windows 上可能静默失效（回调超时被系统摘掉 / 被别的软件钩子干扰）→ 光标悬浮无反应、
@@ -485,6 +592,9 @@ function createPetWindows() {
     // 本进程无从判断这件事——光看光标位置与窗口位移分不清"拖拽跟手"和"漫游/抛掷"，所以由渲染端上报。
     const pointerTimer = setInterval(() => {
       if (pointerFallbackPaused || win.isDestroyed()) return;
+      // 窗口被「显示范围」藏起来时不判定光标：算出来的穿透状态要等窗口冒出来才用得上，
+      // 而此刻翻转它只会让"藏起来那段时间"的状态无谓地与真实光标位置打架。
+      if (!win.isVisible()) return;
       const b = win.getBounds();
       if (b.width < 8 || b.height < 8) return; // 尺寸还没落定（renderer 首帧上报前）
       const ignoring = windowIgnore.get(win.id) !== false;
@@ -524,6 +634,7 @@ function createPetWindows() {
       windowIgnore.delete(win.id);
       inputBusy.delete(win.id);
       offBodyMs.delete(win.id);
+      nativeHandles.delete(win.id);
     });
     win
       .loadFile('index.html', {
@@ -532,6 +643,8 @@ function createPetWindows() {
           bridge: BRIDGE ? '1' : '0',
           scale: String(scale),
           petIndex: String(pet.index),
+          // 建窗时生效的显示范围档位：渲染端拿它当"已上报基线"的初值，避免首拍白发一条 IPC
+          displayScope,
           workAreaW: String(area.width),
           workAreaH: String(area.height),
           workAreaX: String(area.x),
@@ -683,6 +796,14 @@ app.whenReady().then(() => {
     startBridgeCallback(); // 宿主应答回调服务器（stdin 在 Electron 主进程不可用，改走本地 HTTP）
   }
 
+  // 前台窗口探测：**先起通道再建窗**，这样一个 'desktop' 档的初次显示就能拿到正确的前台状态
+  // （否则首帧会按"探测不可用 → 降级成一直可见"先冒出来，下一拍再被藏掉，用户看到一次闪烁）。
+  // 通道起不来时 probeAvailable() 恒为 false，desktop 档降级为一直可见——绝不把宠物藏到用户找不回。
+  foregroundProbe = startForegroundProbe({
+    onState: onForegroundChanged,
+    onWarn: (message) => console.error('[dsh-pet-desktop-helper] ' + message),
+  });
+
   createPetWindows();
 
   // 宠物窗口跟随：renderer 逐帧上报窗口内容区位置/尺寸
@@ -771,6 +892,16 @@ app.whenReady().then(() => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (!win || win.isDestroyed()) return;
     inputBusy.set(win.id, !!busy);
+  });
+
+  // 显示范围（仅桌面 / 全部软件 / 关闭）：渲染端每秒轮询 /state，从 sections.displayScope 读到
+  // 宿主合并好的档位，**只在真的变了**才上报一次。这里是全局档位，任一窗口上报都等效；
+  // 变更后所有宠物窗口立刻按新档位重算可见性，不必重启 helper、也不必重开宠物窗口。
+  ipcMain.on('pet:set-display-scope', (event, value) => {
+    const next = toDisplayScope(value);
+    if (next === displayScope) return;
+    displayScope = next;
+    applyAllWindowVisibility();
   });
 
   // 右键菜单「打开网站」：交给**系统默认浏览器**打开（等效于网页里 Ctrl+点击链接新标签页），
@@ -1060,4 +1191,13 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   app.quit();
+});
+
+// 收尾：前台探测常驻一个 PowerShell 子进程，退出前必须杀掉——否则它会成为孤儿进程一直挂着
+// （它自己在等 WinEvent，不会自行退出）。
+app.on('will-quit', () => {
+  if (foregroundProbe) {
+    foregroundProbe.stop();
+    foregroundProbe = null;
+  }
 });

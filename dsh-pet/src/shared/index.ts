@@ -13,6 +13,7 @@ export * from './displays'; // 多显示器几何（桌面 = 工作区矩形并�
 export * from './motion';
 export * from './balance';
 export * from './whisper';
+export * from './display-scope'; // 桌宠显示范围（仅桌面 / 全部软件 / 关闭：档位白名单与默认值）
 export * from './config';
 export * from './notify';
 export * from './menu'; // 统一右键菜单（本目录唯一的 DOM 例外：树=纯函数，渲染=两端共用同一份）

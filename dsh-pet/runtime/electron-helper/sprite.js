@@ -1131,6 +1131,13 @@ class PetSprite {
       { label: '碎碎念', action: 'whisper' },
       { label: '对话', action: 'chat' },
       { label: '回到初始位置', action: 'home' },
+      // 显示范围（仅桌面 / 全部软件 / 关闭）：与设置页的三选一同一个全局档位。
+      // 当前档位写进分支标签里（菜单组件没有勾选态，见 shared/menu.ts 的 MenuLeaf），
+      // 用户不展开也能看出现在是哪一档。
+      {
+        label: '显示范围：' + SCOPE_LABELS[currentScope()],
+        children: SCOPE_ACTIONS.map((a) => ({ label: a.label, action: 'set-scope', scope: a.scope })),
+      },
       // 改配置文件后免去回设置页点保存：请宿主重启桌面 Helper（全部桌面宠物窗口按最新配置重建）。
       // 放在最后：它是"重新加载"这类维护动作，与上面几个宠物互动项语义不同。
       { label: '重载配置', action: 'reload' },
@@ -1179,6 +1186,10 @@ class PetSprite {
     }
     if (leaf.action === 'home') {
       this.goHome(); // 停漫游/移动，清会话位置，回配置角落
+      return;
+    }
+    if (leaf.action === 'set-scope') {
+      this.setDisplayScopeFromMenu(leaf.scope); // 切换显示范围（仅桌面 / 全部软件 / 关闭）
       return;
     }
     if (leaf.action === 'reload') {
@@ -1296,6 +1307,63 @@ class PetSprite {
     fetch(BASE + '/reload', { method: 'POST' }).catch((e) => {
       console.warn('[dsh-pet] 重载配置请求失败（宿主不可达？）', e);
     });
+  }
+
+  // 「显示范围」菜单（仅桌面 / 全部软件 / 关闭）：与设置页的三选一同一个全局档位，写用户配置。
+  //
+  // 为什么要先 GET 成品配置再 PUT：宿主 `PUT /config` 是**白名单重建**保存——它接受 pets 与一组
+  // 全局字段，未携带的字段靠"从磁盘旧值透传保留"。桌面端手上没有完整用户配置（本页只拉过成品
+  // 聚合），所以先读成品再把档位改掉整份提交，避免手改的 physics/memes 等字段被这次保存抹掉。
+  //
+  // 生效路径分两拍：本地先立即改（菜单标签 + 通知主进程，观感 0 延迟），宿主写盘后把档位写进
+  // /state，下一拍轮询读到同一个值 → 去重后不再重复通知（见 events.js 的 applyDisplayScope）。
+  setDisplayScopeFromMenu(scope) {
+    const next = S.toDisplayScope(scope);
+    const previousScope = currentScope();
+    if (next === previousScope) return; // 已经是这一档：不发请求（菜单里再点一次不该有动静）
+    setCurrentScope(next);
+    if (window.petBridge && window.petBridge.setDisplayScope) window.petBridge.setDisplayScope(next);
+    window.__dshPetDebug.displayScope = next;
+    fetch(BASE + '/config', { cache: 'no-store' })
+      .then((res) => {
+        if (!res.ok) throw new Error('config http ' + res.status);
+        return res.json();
+      })
+      .then((merged) => {
+        const main = merged && merged.main ? merged.main : {};
+        // pets 原样带回（成品拍平过，但 PUT 只认白名单字段，值本身与磁盘一致）；
+        // 其余全局字段一并带上，行为与设置页保存完全一致
+        return fetch(BASE + '/config', {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            pets: main.pets || [],
+            notificationsEnabled: main.notificationsEnabled,
+            whisperImageEnabled: main.whisperImageEnabled,
+            chatImageEnabled: main.chatImageEnabled,
+            confineToScreen: main.confineToScreen,
+            displayScope: next,
+            physics: main.physics,
+            whisperModel: main.whisperModel,
+            chatModel: main.chatModel,
+            chatMemoryRounds: main.chatMemoryRounds,
+            chatImageLimit: main.chatImageLimit,
+          }),
+        });
+      })
+      .then((res) => {
+        if (!res.ok) throw new Error('save http ' + res.status);
+      })
+      .catch((e) => {
+        // 保存失败（宿主不可达 / 配置损坏被 409 拦下）：把本地档位回滚成原值，
+        // 免得菜单标签显示一个并没有真的存下去的档位。主进程那边也会由下一拍 /state 纠正。
+        console.warn('[dsh-pet] 显示范围保存失败，已回滚本地档位', e);
+        setCurrentScope(previousScope);
+        if (window.petBridge && window.petBridge.setDisplayScope) {
+          window.petBridge.setDisplayScope(currentScope());
+        }
+        window.__dshPetDebug.displayScope = currentScope();
+      });
   }
 
   renderBubble() {

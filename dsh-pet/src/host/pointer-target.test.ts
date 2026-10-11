@@ -195,15 +195,26 @@ describe('spriteHitRect —— 与渲染端命中判定同源（否则两条通�
 describe('源码守卫 —— helper 的两个兜底必须在位', () => {
   const main = readSource(helper + 'main.js');
 
-  test('#55-1 兜底显示：ready-to-show 之外还要有"加载完成后仍未显示就 show"', () => {
-    assert.ok(/once\('ready-to-show', \(\) => win\.show\(\)\)/.test(main), 'ready-to-show 的正常路径不能删');
+  test('#55-1 兜底显示：ready-to-show 之外还要有"加载完成后仍未显示就显示"', () => {
+    // 两条路都必须**经 applyWindowVisibility**（而不是直接 win.show()）：显示决定要同时看显示范围
+    // （仅桌面 / 全部软件 / 关闭）与前台状态，绕过它的 win.show() 会让「关闭」档下的宠物凭空冒出来。
+    assert.ok(
+      /once\('ready-to-show', \(\) => applyWindowVisibility\(win\)\)/.test(main),
+      'ready-to-show 的正常路径不能删',
+    );
     assert.ok(
       /once\('did-finish-load'/.test(main),
       '必须有 did-finish-load 兜底（paintWhenInitiallyHidden:false 时 ready-to-show 永不触发）',
     );
     assert.ok(
-      /!win\.isDestroyed\(\) && !win\.isVisible\(\)\) win\.show\(\)/.test(main),
-      '兜底必须在"仍未显示"时才 show',
+      /setTimeout\(\(\) => applyWindowVisibility\(win\), 400\)/.test(main),
+      '兜底必须在页面加载后仍走同一条显示判定',
+    );
+    assert.ok(
+      // 负向断言精确到 `win.show()`（带括号）：`win.showInactive()` 是 applyWindowVisibility 内部
+      // 正当的显示调用，不能被这条守卫误伤
+      !/win\.show\(\)/.test(main),
+      '不得再有绕过 applyWindowVisibility 的裸 win.show()（会无视显示范围直接冒出来）',
     );
   });
 

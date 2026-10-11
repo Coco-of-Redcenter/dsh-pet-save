@@ -45,6 +45,16 @@ const CORNER_SET: ReadonlySet<string> = new Set(CORNERS);
 const PET_DISPLAYS = ['web', 'desktop', 'both', 'none'] as const;
 const PET_DISPLAY_SET: ReadonlySet<string> = new Set(PET_DISPLAYS);
 
+/**
+ * displayScope 白名单（桌宠显示范围：仅桌面 / 全部软件 / 关闭）。
+ *
+ * 与 src/shared/display-scope.ts 的 DISPLAY_SCOPES 是同一份契约——但 host **不得** import
+ * src/shared（DSH 单文件加载约束会把 shared 拆成 chunk 导致加载失败，见 src/shared/index.ts
+ * 的约定），所以这里像 PET_DISPLAYS 一样自己列一遍。两处的值必须同步改。
+ */
+const DISPLAY_SCOPES = ['desktop', 'all', 'off'] as const;
+const DISPLAY_SCOPE_SET: ReadonlySet<string> = new Set(DISPLAY_SCOPES);
+
 /** id 禁用的字符（Windows 文件名保留符 + 控制字符，防配置值逃逸文件路径）。
  *  同时被 thumb 路由的 petId 校验复用：那里同样是"标识符不得当路径片段"。 */
 // eslint-disable-next-line no-control-regex
@@ -318,6 +328,9 @@ function topFieldValid(key: string, value: unknown): boolean {
     }
     case 'notificationsEnabled':
       return typeof value === 'boolean';
+    case 'displayScope':
+      // 显示范围：只认三档字符串（非法与缺失同处理 → 取内置默认 "all" + 告警）
+      return typeof value === 'string' && DISPLAY_SCOPE_SET.has(value);
     case 'whisperImageEnabled':
       return typeof value === 'boolean';
     case 'chatImageEnabled':
@@ -573,8 +586,8 @@ export function findPetInstance(
 
 /**
  * 保存用户层（PUT /config）：更新 main-config.jsonc，接受可编辑字段（pets + 全局开关：
- * notificationsEnabled / whisperImageEnabled / chatImageEnabled / confineToScreen + physics
- * + whisperModel / chatModel + chatMemoryRounds + chatImageLimit）。
+ * notificationsEnabled / displayScope / whisperImageEnabled / chatImageEnabled / confineToScreen
+ * + physics + whisperModel / chatModel + chatMemoryRounds + chatImageLimit）。
  * 编辑语义：**非白名单顶层字段（whisperPrompt / eventsRefreshSec / memes 等）从
  * `existing`（当前磁盘上的用户文件原对象）原样透传保留**——
  * 用户手动编辑的精调配置不会被设置页保存抹掉（旧实现是纯白名单重建，会整体覆盖丢失）。
@@ -635,6 +648,11 @@ export function saveUserConfig(
   }
   const ne = o.notificationsEnabled;
   if (ne !== undefined && typeof ne !== 'boolean') return null;
+  // displayScope（桌宠显示范围：仅桌面 / 全部软件 / 关闭；设置页单选与右键菜单写的就是它）：
+  // 与四个全局开关同一套语义——传了就校验后进白名单，没传则走下面的透传保留。
+  // 校验复用读取侧的 topFieldValid，读写同一份规则。
+  const ds = o.displayScope;
+  if (ds !== undefined && !topFieldValid('displayScope', ds)) return null;
   const wie = o.whisperImageEnabled;
   if (wie !== undefined && typeof wie !== 'boolean') return null;
   const cie = o.chatImageEnabled;
@@ -670,6 +688,7 @@ export function saveUserConfig(
   // 对话历史条数）同样只在请求体**真的传了**时才写（未传则走下面的透传保留，不凭空造值）
   const outConfig: { pets: unknown[]; [key: string]: unknown } = { pets: out };
   if (ne !== undefined) outConfig.notificationsEnabled = ne;
+  if (ds !== undefined) outConfig.displayScope = ds;
   if (wie !== undefined) outConfig.whisperImageEnabled = wie;
   if (cie !== undefined) outConfig.chatImageEnabled = cie;
   if (cts !== undefined) outConfig.confineToScreen = cts;
@@ -685,6 +704,7 @@ export function saveUserConfig(
   // 否则整包调用的调用方漏传一个字段，就会把用户既有设置悄悄抹成默认。
   const bodyOwned = new Set(['pets']);
   if (ne !== undefined) bodyOwned.add('notificationsEnabled');
+  if (ds !== undefined) bodyOwned.add('displayScope');
   if (wie !== undefined) bodyOwned.add('whisperImageEnabled');
   if (cie !== undefined) bodyOwned.add('chatImageEnabled');
   if (cts !== undefined) bodyOwned.add('confineToScreen');
